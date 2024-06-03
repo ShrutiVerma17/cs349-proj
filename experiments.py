@@ -8,6 +8,8 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from typing import Sequence
 import torch
 import numpy as np
+from tqdm import tqdm
+
 
 _SSM_NAME = "JackFram/llama-160m"
 _LLM_NAME = "openlm-research/open_llama_3b_v2"
@@ -272,8 +274,8 @@ kv_sizes = [0, 128, 256, 512, 1024, 2048]
 sequential_times = {}
 tree_times = {}
 
-for config in expansion_configs:
-    for kv_size in kv_sizes:
+for config in tqdm(expansion_configs, desc="Configs"):
+    for kv_size in tqdm(kv_sizes, "KV cache sizes"):
         print("-----------")
         overall_conf = str(config) + ", " + str(kv_size)
         print(overall_conf)
