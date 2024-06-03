@@ -16,8 +16,16 @@ device = "cuda"
 
 assert torch.cuda.is_available()
 tokenizer = AutoTokenizer.from_pretrained(_SSM_NAME)
-ssm = AutoModelForCausalLM.from_pretrained(_SSM_NAME).cuda().eval()
-llm = AutoModelForCausalLM.from_pretrained(_LLM_NAME).cuda().eval()
+ssm = (
+    AutoModelForCausalLM.from_pretrained(_SSM_NAME, torch_dtype=torch.float16)
+    .cuda()
+    .eval()
+)
+llm = (
+    AutoModelForCausalLM.from_pretrained(_LLM_NAME, torch_dtype=torch.float16)
+    .cuda()
+    .eval()
+)
 
 
 _PROMPT = "The good dog is"
@@ -140,7 +148,7 @@ def _create_dummy_kv_cache(
         num_attention_heads,
         kv_cache_num_tokens,
         hidden_size // num_attention_heads,
-        dtype=torch.bfloat16,
+        dtype=torch.float16,
         device="cuda",
     )
     v = torch.rand(
@@ -148,16 +156,14 @@ def _create_dummy_kv_cache(
         num_attention_heads,
         kv_cache_num_tokens,
         hidden_size // num_attention_heads,
-        dtype=torch.bfloat16,
+        dtype=torch.float16,
         device="cuda",
     )
     return tuple((k, v) for _ in range(num_layers))
 
 
 def time_normal(input_ids, model: AutoModelForCausalLM, kv_cache=None):
-    with torch.inference_mode(), torch.autocast(
-        device_type="cuda", dtype=torch.bfloat16
-    ), torch.backends.cuda.sdp_kernel(enable_flash=False):
+    with torch.inference_mode(), torch.backends.cuda.sdp_kernel(enable_flash=False):
         model(
             input_ids=input_ids,
             past_key_values=kv_cache,
@@ -168,9 +174,7 @@ def time_normal(input_ids, model: AutoModelForCausalLM, kv_cache=None):
 def time_tree(
     input_ids, mask, position_ids, model: AutoModelForCausalLM, kv_cache=None
 ):
-    with torch.inference_mode(), torch.autocast(
-        device_type="cuda", dtype=torch.bfloat16
-    ), torch.backends.cuda.sdp_kernel(enable_flash=False):
+    with torch.inference_mode(), torch.backends.cuda.sdp_kernel(enable_flash=False):
         model(
             input_ids=input_ids,
             attention_mask=mask,
@@ -237,6 +241,7 @@ def generate_expansion_configs(config_length, min_expansion, max_expansion):
 def reset_memory():
     gc.collect()
     torch.cuda.empty_cache()
+    torch.cuda.reset_max_memory_allocated()
     torch.cuda.synchronize()
 
 
