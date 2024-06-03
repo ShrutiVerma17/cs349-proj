@@ -22,7 +22,10 @@ ssm = (
     .eval()
 )
 llm = (
-    AutoModelForCausalLM.from_pretrained(_LLM_NAME, torch_dtype=torch.float16)
+    AutoModelForCausalLM.from_pretrained(
+        _LLM_NAME,
+        torch_dtype=torch.float16,
+    )
     .cuda()
     .eval()
 )
@@ -163,7 +166,7 @@ def _create_dummy_kv_cache(
 
 
 def time_normal(input_ids, model: AutoModelForCausalLM, kv_cache=None):
-    with torch.inference_mode(), torch.backends.cuda.sdp_kernel(enable_flash=False):
+    with torch.inference_mode()
         model(
             input_ids=input_ids,
             past_key_values=kv_cache,
@@ -174,7 +177,7 @@ def time_normal(input_ids, model: AutoModelForCausalLM, kv_cache=None):
 def time_tree(
     input_ids, mask, position_ids, model: AutoModelForCausalLM, kv_cache=None
 ):
-    with torch.inference_mode(), torch.backends.cuda.sdp_kernel(enable_flash=False):
+    with torch.inference_mode():  # , torch.backends.cuda.sdp_kernel(enable_flash=False):
         model(
             input_ids=input_ids,
             attention_mask=mask,
@@ -258,12 +261,12 @@ import numpy as np
 
 N_ITERATIONS = 32
 
-expansion_configs = []
-for length in range(2, 5):
-    expansion_configs.extend(
-        generate_expansion_configs(length, 2, 6)
-    )  # first arg = length of config, second arg = min val in config, third = max
-kv_sizes = [0, 128, 256, 512, 1024]
+
+# for length in range(2, 5):
+#     expansion_configs.extend(
+#         generate_expansion_configs(length, 2, 6)
+# )  # first arg = length of config, second arg = min val in config, third = max
+kv_sizes = [0]
 # expansion_configs = [(7, 7, 7)]
 # kv_sizes = [1024]
 
@@ -405,7 +408,5 @@ f2 = open("saved_tree.pkl", "wb")
 pickle.dump(tree_times, f2)
 f2.close()
 
-# with open('saved_sequential.pkl', 'wb') as f:
-#    pickle.dump(sequential_times, f)
-# with open('saved_tree.pkl', 'wb') as f:
-#    pickle.dump(tree_times, f)
+if __name__ == "__main__":
+    main()
