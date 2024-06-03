@@ -8,7 +8,6 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from typing import Sequence
 import torch
 import numpy as np
-import time
 
 _SSM_NAME = "JackFram/llama-160m"
 _LLM_NAME = "openlm-research/open_llama_3b_v2"
@@ -166,7 +165,7 @@ def _create_dummy_kv_cache(
 
 
 def time_normal(input_ids, model: AutoModelForCausalLM, kv_cache=None):
-    with torch.inference_mode()
+    with torch.inference_mode():
         model(
             input_ids=input_ids,
             past_key_values=kv_cache,
@@ -177,7 +176,7 @@ def time_normal(input_ids, model: AutoModelForCausalLM, kv_cache=None):
 def time_tree(
     input_ids, mask, position_ids, model: AutoModelForCausalLM, kv_cache=None
 ):
-    with torch.inference_mode():  # , torch.backends.cuda.sdp_kernel(enable_flash=False):
+    with torch.inference_mode():
         model(
             input_ids=input_ids,
             attention_mask=mask,
@@ -261,15 +260,14 @@ import numpy as np
 
 N_ITERATIONS = 32
 
-
-# for length in range(2, 5):
-#     expansion_configs.extend(
-#         generate_expansion_configs(length, 2, 6)
-# )  # first arg = length of config, second arg = min val in config, third = max
-kv_sizes = [0]
+expansion_configs = []
+for length in range(2, 5):
+    expansion_configs.extend(
+        generate_expansion_configs(length, 2, 6)
+    )  # first arg = length of config, second arg = min val in config, third = max
+kv_sizes = [0, 128, 256, 512, 1024, 2048]
 # expansion_configs = [(7, 7, 7)]
 # kv_sizes = [1024]
-
 # past_key_values, need tuple of two tensors of shape (batch_size, num_heads, sequence_length, embed_size_per_head))
 sequential_times = {}
 tree_times = {}
@@ -279,16 +277,16 @@ for config in expansion_configs:
         print("-----------")
         overall_conf = str(config) + ", " + str(kv_size)
         print(overall_conf)
-        token_tree = _create_token_tree(
-            expansion_config=config,
-            prompt=_PROMPT,
-            tokenizer=tokenizer,
-            model=ssm,
-            has_kv_cache=kv_size > 0,
-        )
-
-        batch_size = np.prod(config)
         try:
+            token_tree = _create_token_tree(
+                expansion_config=config,
+                prompt=_PROMPT,
+                tokenizer=tokenizer,
+                model=ssm,
+                has_kv_cache=kv_size > 0,
+            )
+
+            batch_size = np.prod(config)
             kv_cache_sequential = _create_dummy_kv_cache(
                 kv_cache_num_tokens=kv_size,
                 batch_size=batch_size,
@@ -296,98 +294,98 @@ for config in expansion_configs:
                 hidden_size=llm.config.hidden_size,
                 num_layers=llm.config.num_hidden_layers,
             )
-        except:
+
+            sequential_timer = benchmark.Timer(
+                stmt="time_normal(input_ids, model, kv_cache)",
+                setup="from __main__ import time_normal",
+                num_threads=torch.get_num_threads(),
+                globals={
+                    "input_ids": token_tree,
+                    "model": llm,
+                    "kv_cache": kv_cache_sequential,
+                },
+                label="Sequential",
+            )
+            sequential_measurement = sequential_timer.blocked_autorange(min_run_time=1)
+            seq_time = sequential_measurement.mean
+            print("Sequential Time: ", seq_time)
+
+            # Warmup
+            time_normal(
+                input_ids=token_tree,
+                model=llm,
+                kv_cache=kv_cache_sequential,
+            )
+            reset_memory()
+            time_normal(
+                input_ids=token_tree,
+                model=llm,
+                kv_cache=kv_cache_sequential,
+            )
+            mem_gb = end_memory_collection()
+            utilization = torch.cuda.utilization()
+            sequential_times[overall_conf] = [seq_time, mem_gb, utilization]
+            print("Mem GB: ", mem_gb)
+            print("Utilization: ", utilization)
+
+            # construct inputs for tree decoding
+            kv_cache_tree = _create_dummy_kv_cache(
+                kv_cache_num_tokens=kv_size,
+                batch_size=1,
+                num_attention_heads=llm.config.num_attention_heads,
+                hidden_size=llm.config.hidden_size,
+                num_layers=llm.config.num_hidden_layers,
+            )
+            tree_input, tree_mask, tree_position_ids = construct_tree_model_inputs(
+                token_tree
+            )
+            # Required for 4D mask support in new HF
+            tree_mask = _invert_4d_attention_mask(tree_mask, kv_size)
+
+            tree_timer = benchmark.Timer(
+                stmt="time_tree(input_ids, mask, position_ids, model, kv_cache)",
+                setup="from __main__ import time_tree",
+                num_threads=torch.get_num_threads(),
+                globals={
+                    "input_ids": tree_input,
+                    "mask": tree_mask,
+                    "position_ids": tree_position_ids,
+                    "model": llm,
+                    "kv_cache": kv_cache_tree,
+                },
+                label="Tree",
+            )
+
+            tree_measurement = tree_timer.blocked_autorange(min_run_time=1)
+            tree_time = tree_measurement.mean
+            print("Tree Time: ", tree_time)
+
+            # Warmup
+            time_tree(
+                input_ids=tree_input,
+                mask=tree_mask,
+                position_ids=tree_position_ids,
+                model=llm,
+                kv_cache=kv_cache_tree,
+            )
+            reset_memory()
+            time_tree(
+                input_ids=tree_input,
+                mask=tree_mask,
+                position_ids=tree_position_ids,
+                model=llm,
+                kv_cache=kv_cache_tree,
+            )
+            mem_gb = end_memory_collection()
+            utilization = torch.cuda.utilization()
+            print("Mem GB: ", mem_gb)
+            print("Utilization: ", utilization)
+            tree_times[overall_conf] = [tree_time, mem_gb, utilization]
+            reset_memory()
+            print("-----------")
+        except RuntimeError as e:
             print("SKIPPED")
             continue
-
-        sequential_timer = benchmark.Timer(
-            stmt="time_normal(input_ids, model, kv_cache)",
-            setup="from __main__ import time_normal",
-            num_threads=torch.get_num_threads(),
-            globals={
-                "input_ids": token_tree,
-                "model": llm,
-                "kv_cache": kv_cache_sequential,
-            },
-            label="Sequential",
-        )
-        sequential_measurement = sequential_timer.timeit(N_ITERATIONS)
-        seq_time = sequential_measurement.times[-1]
-        print("Sequential Time: ", seq_time)
-
-        # Warmup
-        time_normal(
-            input_ids=token_tree,
-            model=llm,
-            kv_cache=kv_cache_sequential,
-        )
-        reset_memory()
-        time_normal(
-            input_ids=token_tree,
-            model=llm,
-            kv_cache=kv_cache_sequential,
-        )
-        mem_gb = end_memory_collection()
-        utilization = torch.cuda.utilization()
-        sequential_times[overall_conf] = [seq_time, mem_gb, utilization]
-        print("Mem GB: ", mem_gb)
-        print("Utilization: ", utilization)
-
-        # construct inputs for tree decoding
-        kv_cache_tree = _create_dummy_kv_cache(
-            kv_cache_num_tokens=kv_size,
-            batch_size=1,
-            num_attention_heads=llm.config.num_attention_heads,
-            hidden_size=llm.config.hidden_size,
-            num_layers=llm.config.num_hidden_layers,
-        )
-        tree_input, tree_mask, tree_position_ids = construct_tree_model_inputs(
-            token_tree
-        )
-        # Required for 4D mask support in new HF
-        tree_mask = _invert_4d_attention_mask(tree_mask, kv_size)
-
-        tree_timer = benchmark.Timer(
-            stmt="time_tree(input_ids, mask, position_ids, model, kv_cache)",
-            setup="from __main__ import time_tree",
-            num_threads=torch.get_num_threads(),
-            globals={
-                "input_ids": tree_input,
-                "mask": tree_mask,
-                "position_ids": tree_position_ids,
-                "model": llm,
-                "kv_cache": kv_cache_tree,
-            },
-            label="Tree",
-        )
-
-        tree_measurement = tree_timer.timeit(N_ITERATIONS)
-        tree_time = tree_measurement.times[-1]
-        print("Tree Time: ", tree_time)
-
-        # Warmup
-        time_tree(
-            input_ids=tree_input,
-            mask=tree_mask,
-            position_ids=tree_position_ids,
-            model=llm,
-            kv_cache=kv_cache_tree,
-        )
-        reset_memory()
-        time_tree(
-            input_ids=tree_input,
-            mask=tree_mask,
-            position_ids=tree_position_ids,
-            model=llm,
-            kv_cache=kv_cache_tree,
-        )
-        mem_gb = end_memory_collection()
-        utilization = torch.cuda.utilization()
-        print("Mem GB: ", mem_gb)
-        print("Utilization: ", utilization)
-        tree_times[overall_conf] = [tree_time, mem_gb, utilization]
-
-        print("-----------")
 
 # In[12]:
 
@@ -407,6 +405,3 @@ f.close()
 f2 = open("saved_tree.pkl", "wb")
 pickle.dump(tree_times, f2)
 f2.close()
-
-if __name__ == "__main__":
-    main()
