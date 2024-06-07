@@ -9,6 +9,7 @@ from typing import Sequence
 import torch
 import numpy as np
 from tqdm import tqdm
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 
 _SSM_NAME = "JackFram/llama-160m"
@@ -22,14 +23,20 @@ ssm = (
     .cuda()
     .eval()
 )
+
 llm = (
-    AutoModelForCausalLM.from_pretrained(
-        _LLM_NAME,
-        torch_dtype=torch.float16,
-    )
+    AutoModelForCausalLM.from_pretrained(_LLM_NAME, torch_dtype=torch.float16)
     .cuda()
     .eval()
 )
+llm_flash = llm
+# llm_flash = (
+#     AutoModelForCausalLM.from_pretrained(
+#         _LLM_NAME, torch_dtype=torch.float16, attn_implementation="flash_attention_2"
+#     )
+#     .cuda()
+#     .eval()
+# )
 
 
 _PROMPT = "The good dog is"
@@ -167,7 +174,9 @@ def _create_dummy_kv_cache(
 
 
 def time_normal(input_ids, model: AutoModelForCausalLM, kv_cache=None):
-    with torch.inference_mode():
+    with torch.inference_mode(), sdpa_kernel(
+        [SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH, SDPBackend.CUDNN_ATTENTION]
+    ):
         model(
             input_ids=input_ids,
             past_key_values=kv_cache,
@@ -178,7 +187,9 @@ def time_normal(input_ids, model: AutoModelForCausalLM, kv_cache=None):
 def time_tree(
     input_ids, mask, position_ids, model: AutoModelForCausalLM, kv_cache=None
 ):
-    with torch.inference_mode():
+    with torch.inference_mode(), sdpa_kernel(
+        [SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH, SDPBackend.CUDNN_ATTENTION]
+    ):
         model(
             input_ids=input_ids,
             attention_mask=mask,
@@ -262,14 +273,14 @@ import numpy as np
 
 N_ITERATIONS = 32
 
-expansion_configs = []
-for length in range(2, 5):
-    expansion_configs.extend(
-        generate_expansion_configs(length, 2, 6)
-    )  # first arg = length of config, second arg = min val in config, third = max
-kv_sizes = [0, 128, 256, 512, 1024, 2048]
+expansion_configs = [(2, 1, 1)]
+# for length in range(2, 5):
+#     expansion_configs.extend(
+#         generate_expansion_configs(length, 1, 6)
+#     )  # first arg = length of config, second arg = min val in config, third = max
+# kv_sizes = [0]
 # expansion_configs = [(7, 7, 7)]
-# kv_sizes = [1024]
+kv_sizes = [8]
 # past_key_values, need tuple of two tensors of shape (batch_size, num_heads, sequence_length, embed_size_per_head))
 sequential_times = {}
 tree_times = {}
@@ -292,10 +303,13 @@ for config in tqdm(expansion_configs, desc="Configs"):
             kv_cache_sequential = _create_dummy_kv_cache(
                 kv_cache_num_tokens=kv_size,
                 batch_size=batch_size,
-                num_attention_heads=llm.config.num_attention_heads,
-                hidden_size=llm.config.hidden_size,
-                num_layers=llm.config.num_hidden_layers,
+                num_attention_heads=llm_flash.config.num_attention_heads,
+                hidden_size=llm_flash.config.hidden_size,
+                num_layers=llm_flash.config.num_hidden_layers,
             )
+
+            if batch_size % 8 == 0 and token_tree.shape[-1] % 8 == 0:
+                print("Multiples of 8!")
 
             sequential_timer = benchmark.Timer(
                 stmt="time_normal(input_ids, model, kv_cache)",
@@ -303,7 +317,7 @@ for config in tqdm(expansion_configs, desc="Configs"):
                 num_threads=torch.get_num_threads(),
                 globals={
                     "input_ids": token_tree,
-                    "model": llm,
+                    "model": llm_flash,
                     "kv_cache": kv_cache_sequential,
                 },
                 label="Sequential",
@@ -315,17 +329,17 @@ for config in tqdm(expansion_configs, desc="Configs"):
             # Warmup
             time_normal(
                 input_ids=token_tree,
-                model=llm,
+                model=llm_flash,
                 kv_cache=kv_cache_sequential,
             )
             reset_memory()
             time_normal(
                 input_ids=token_tree,
-                model=llm,
+                model=llm_flash,
                 kv_cache=kv_cache_sequential,
             )
-            mem_gb = end_memory_collection()
             utilization = torch.cuda.utilization()
+            mem_gb = end_memory_collection()
             sequential_times[overall_conf] = [seq_time, mem_gb, utilization]
             print("Mem GB: ", mem_gb)
             print("Utilization: ", utilization)
@@ -389,21 +403,15 @@ for config in tqdm(expansion_configs, desc="Configs"):
             print("SKIPPED")
             continue
 
-# In[12]:
-
-
 print(sequential_times)
 print(tree_times)
 
 
-# In[13]:
-
-
 import pickle
 
-f = open("saved_sequential.pkl", "wb")
+f = open("saved_sequential_no_flash_correct.pkl", "wb")
 pickle.dump(sequential_times, f)
 f.close()
-f2 = open("saved_tree.pkl", "wb")
+f2 = open("saved_tree_no_flash_correct.pkl", "wb")
 pickle.dump(tree_times, f2)
 f2.close()

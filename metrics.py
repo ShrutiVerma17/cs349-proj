@@ -9,7 +9,8 @@ class GPU:
 
 
 # https://www.nvidia.com/en-us/data-center/tesla-t4/
-T4 = GPU(tflops=8.1, memory_bandwidth_tb_s=0.3)
+T4 = GPU(tflops=65, memory_bandwidth_tb_s=0.3)
+A6000 = GPU(tflops=91.1, memory_bandwidth_tb_s=0.960)
 
 
 def _total_tflops(
