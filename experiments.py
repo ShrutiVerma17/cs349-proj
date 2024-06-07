@@ -10,6 +10,7 @@ import torch
 import numpy as np
 from tqdm import tqdm
 from torch.nn.attention import SDPBackend, sdpa_kernel
+import copy
 
 
 _SSM_NAME = "JackFram/llama-160m"
@@ -120,27 +121,36 @@ def _invert_4d_attention_mask(
 
 
 def construct_tree_model_inputs(sequences):
-    # input_1 = torch.unique(torch.flatten(sequences), sorted=False)
     flat = torch.flatten(sequences).tolist()
-    unique = []
-    for tok in flat:
-        if tok not in unique:
-            unique.append(tok)
-    # input is list of unique tokens
-    input_1 = torch.tensor([unique]).to(device)
+    truly_unique_tokens = []
+    tokens_to_keep = []
+    positions = []
+    mask_1 = np.zeros((len(flat), len(flat)))
+
+    for seq_num, seq in enumerate(sequences):
+        preceding_tokens = []
+        preceding_matrix_locs = []
+        for pos, tok in enumerate(seq):
+            preceding_tokens.append(tok)
+            if preceding_tokens not in truly_unique_tokens:
+                truly_unique_tokens.append(
+                    copy.copy(preceding_tokens)
+                )  # is this okay or do I need to make a copy?
+                tokens_to_keep.append(tok)
+                positions.append(pos)
+                preceding_matrix_locs.append(len(tokens_to_keep) - 1)
+                for preceding in preceding_matrix_locs:
+                    mask_1[len(tokens_to_keep) - 1][preceding] = 1.0
+            else:
+                preceding_matrix_locs.append(
+                    truly_unique_tokens.index(preceding_tokens)
+                )
+
+    input_1 = torch.tensor([tokens_to_keep]).to(device)
 
     a = input_1.shape[-1]
-    mask_1 = np.zeros((a, a))
-    positions = [-1] * len(unique)
+    mask_1 = mask_1[:a, :a]
 
-    for seq in sequences:
-        branch_progress = []
-        for pos, tok in enumerate(seq):
-            input_1_idx = unique.index(tok)
-            positions[input_1_idx] = pos
-            branch_progress.append(input_1_idx)
-            for idx in branch_progress:
-                mask_1[input_1_idx][idx] = 1.0
     mask_1 = torch.tensor(mask_1, device=device, dtype=torch.float16)
     mask_1 = mask_1.unsqueeze(0).unsqueeze(0).to(device)
     position_ids_1 = torch.tensor([positions], device=device, dtype=torch.int)
@@ -273,12 +283,12 @@ import numpy as np
 
 N_ITERATIONS = 32
 
-expansion_configs = [(2, 1, 1)]
-# for length in range(2, 5):
-#     expansion_configs.extend(
-#         generate_expansion_configs(length, 1, 6)
-#     )  # first arg = length of config, second arg = min val in config, third = max
-# kv_sizes = [0]
+expansion_configs = []
+for length in range(2, 5):
+    expansion_configs.extend(
+        generate_expansion_configs(length, 1, 6)
+    )  # first arg = length of config, second arg = min val in config, third = max
+kv_sizes = [0, 2, 4, 8, 16, 64, 128]
 # expansion_configs = [(7, 7, 7)]
 kv_sizes = [8]
 # past_key_values, need tuple of two tensors of shape (batch_size, num_heads, sequence_length, embed_size_per_head))
@@ -354,6 +364,14 @@ for config in tqdm(expansion_configs, desc="Configs"):
             )
             tree_input, tree_mask, tree_position_ids = construct_tree_model_inputs(
                 token_tree
+            )
+            correct_len = len(_PROMPT.split(" ")) + np.sum(np.cumprod(config))
+            # print(correct_len)
+            # print(tree_input.shape[-1])
+            # print(tree_mask.shape[2])
+            assert tree_input.shape[-1] == correct_len
+            assert (
+                tree_mask.shape[2] == correct_len and tree_mask.shape[3] == correct_len
             )
             # Required for 4D mask support in new HF
             tree_mask = _invert_4d_attention_mask(tree_mask, kv_size)
