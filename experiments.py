@@ -30,14 +30,6 @@ llm = (
     .cuda()
     .eval()
 )
-llm_flash = llm
-# llm_flash = (
-#     AutoModelForCausalLM.from_pretrained(
-#         _LLM_NAME, torch_dtype=torch.float16, attn_implementation="flash_attention_2"
-#     )
-#     .cuda()
-#     .eval()
-# )
 
 
 _PROMPT = "The good dog is"
@@ -289,8 +281,6 @@ for length in range(2, 5):
         generate_expansion_configs(length, 1, 6)
     )  # first arg = length of config, second arg = min val in config, third = max
 kv_sizes = [0, 2, 4, 8, 16, 64, 128]
-# expansion_configs = [(7, 7, 7)]
-kv_sizes = [8]
 # past_key_values, need tuple of two tensors of shape (batch_size, num_heads, sequence_length, embed_size_per_head))
 sequential_times = {}
 tree_times = {}
@@ -313,9 +303,9 @@ for config in tqdm(expansion_configs, desc="Configs"):
             kv_cache_sequential = _create_dummy_kv_cache(
                 kv_cache_num_tokens=kv_size,
                 batch_size=batch_size,
-                num_attention_heads=llm_flash.config.num_attention_heads,
-                hidden_size=llm_flash.config.hidden_size,
-                num_layers=llm_flash.config.num_hidden_layers,
+                num_attention_heads=llm.config.num_attention_heads,
+                hidden_size=llm.config.hidden_size,
+                num_layers=llm.config.num_hidden_layers,
             )
 
             if batch_size % 8 == 0 and token_tree.shape[-1] % 8 == 0:
@@ -327,30 +317,35 @@ for config in tqdm(expansion_configs, desc="Configs"):
                 num_threads=torch.get_num_threads(),
                 globals={
                     "input_ids": token_tree,
-                    "model": llm_flash,
+                    "model": llm,
                     "kv_cache": kv_cache_sequential,
                 },
                 label="Sequential",
             )
             sequential_measurement = sequential_timer.blocked_autorange(min_run_time=1)
-            seq_time = sequential_measurement.mean
-            print("Sequential Time: ", seq_time)
+            seq_time_mean = sequential_measurement.mean
+            seq_time_median = sequential_measurement.median
+            seq_num_samples = len(sequential_measurement.times)
+            seq_p90 = np.percentile(sequential_measurement.times, 90)
+            print(
+                f"Sequential Time\nNum Samples: {seq_num_samples} Median: {seq_time_median} P90: {seq_p90} Mean: {seq_time_mean}"
+            )
 
             # Warmup
             time_normal(
                 input_ids=token_tree,
-                model=llm_flash,
+                model=llm,
                 kv_cache=kv_cache_sequential,
             )
             reset_memory()
             time_normal(
                 input_ids=token_tree,
-                model=llm_flash,
+                model=llm,
                 kv_cache=kv_cache_sequential,
             )
             utilization = torch.cuda.utilization()
             mem_gb = end_memory_collection()
-            sequential_times[overall_conf] = [seq_time, mem_gb, utilization]
+            sequential_times[overall_conf] = [seq_time_median, mem_gb, utilization]
             print("Mem GB: ", mem_gb)
             print("Utilization: ", utilization)
 
@@ -366,9 +361,6 @@ for config in tqdm(expansion_configs, desc="Configs"):
                 token_tree
             )
             correct_len = len(_PROMPT.split(" ")) + np.sum(np.cumprod(config))
-            # print(correct_len)
-            # print(tree_input.shape[-1])
-            # print(tree_mask.shape[2])
             assert tree_input.shape[-1] == correct_len
             assert (
                 tree_mask.shape[2] == correct_len and tree_mask.shape[3] == correct_len
@@ -391,8 +383,13 @@ for config in tqdm(expansion_configs, desc="Configs"):
             )
 
             tree_measurement = tree_timer.blocked_autorange(min_run_time=1)
-            tree_time = tree_measurement.mean
-            print("Tree Time: ", tree_time)
+            tree_time_mean = tree_measurement.mean
+            tree_time_median = tree_measurement.median
+            tree_num_samples = len(tree_measurement.times)
+            tree_p90 = np.percentile(tree_measurement.times, 90)
+            print(
+                f"Tree Time\nNum Samples: {tree_num_samples} Median: {tree_time_median} P90: {tree_p90} Mean: {tree_time_mean}"
+            )
 
             # Warmup
             time_tree(
@@ -414,7 +411,7 @@ for config in tqdm(expansion_configs, desc="Configs"):
             utilization = torch.cuda.utilization()
             print("Mem GB: ", mem_gb)
             print("Utilization: ", utilization)
-            tree_times[overall_conf] = [tree_time, mem_gb, utilization]
+            tree_times[overall_conf] = [tree_time_median, mem_gb, utilization]
             reset_memory()
             print("-----------")
         except RuntimeError as e:
@@ -427,9 +424,9 @@ print(tree_times)
 
 import pickle
 
-f = open("saved_sequential_no_flash_correct.pkl", "wb")
+f = open("saved_sequential.pkl", "wb")
 pickle.dump(sequential_times, f)
 f.close()
-f2 = open("saved_tree_no_flash_correct.pkl", "wb")
+f2 = open("saved_tree.pkl", "wb")
 pickle.dump(tree_times, f2)
 f2.close()
