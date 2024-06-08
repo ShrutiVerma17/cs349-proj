@@ -17,6 +17,7 @@ import gc
 import torch.utils.benchmark as benchmark
 import numpy as np
 import pickle
+from datetime import datetime
 
 
 _SSM_NAME = "JackFram/llama-160m"
@@ -25,17 +26,6 @@ device = "cuda"
 
 assert torch.cuda.is_available()
 tokenizer = AutoTokenizer.from_pretrained(_SSM_NAME)
-ssm = (
-    AutoModelForCausalLM.from_pretrained(_SSM_NAME, torch_dtype=torch.float16)
-    .cuda()
-    .eval()
-)
-
-llm = (
-    AutoModelForCausalLM.from_pretrained(_LLM_NAME, torch_dtype=torch.float16)
-    .cuda()
-    .eval()
-)
 
 
 _PROMPT = "The good dog is"
@@ -228,6 +218,24 @@ def end_memory_collection():
 
 def main(parser):
     args = parser.parse_args()
+
+    ssm = (
+        AutoModelForCausalLM.from_pretrained(_SSM_NAME, torch_dtype=torch.float16)
+        .cuda()
+        .eval()
+    )
+
+    attn_implementation = "flash_attention_2" if args.flash else "sdpa"
+    llm = (
+        AutoModelForCausalLM.from_pretrained(
+            _LLM_NAME,
+            attn_implementation=attn_implementation,
+            torch_dtype=torch.float16,
+        )
+        .cuda()
+        .eval()
+    )
+
     expansion_configs = []
     for length in range(2, 5):
         expansion_configs.extend(
@@ -304,6 +312,10 @@ def main(parser):
                 print("Mem GB: ", mem_gb)
                 print("Utilization: ", utilization)
 
+                if args.flash:
+                    # Skipping tree for flash attention since it can't use it
+                    continue
+
                 # construct inputs for tree decoding
                 kv_cache_tree = _create_dummy_kv_cache(
                     kv_cache_num_tokens=kv_size,
@@ -379,10 +391,14 @@ def main(parser):
     print(sequential_times)
     print(tree_times)
 
-    f = open("saved_sequential.pkl", "wb")
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
+    sequential_file_name = f"saved_sequential"
+    if args.flash:
+        sequential_file_name += "_flash"
+    f = open(f"{sequential_file_name}_{timestamp}.pkl", "wb")
     pickle.dump(sequential_times, f)
     f.close()
-    f2 = open("saved_tree.pkl", "wb")
+    f2 = open(f"saved_tree_{timestamp}.pkl", "wb")
     pickle.dump(tree_times, f2)
     f2.close()
 
@@ -394,5 +410,10 @@ if __name__ == "__main__":
         type=int,
         default=1,
         help="Minimum number of seconds to run the benchmark (blocked_autorange parameter).",
+    )
+    parser.add_argument(
+        "--flash",
+        action="store_true",
+        help="Allow flash attention 2 for sequential decoding. Skips tree since this would throw an error.",
     )
     main(parser)
