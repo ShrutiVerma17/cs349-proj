@@ -173,6 +173,14 @@ def _create_dummy_kv_cache(
     return tuple((k, v) for _ in range(num_layers))
 
 
+def _get_llama_attn_implementation(use_flash: bool):
+    new_torch_version = torch.__version__ >= "2.1.1"
+    if use_flash:
+        assert new_torch_version
+        return "flash_attention_2"
+    return "sdpa" if new_torch_version else "eager"
+
+
 def time_normal(input_ids, model: AutoModelForCausalLM, kv_cache=None):
     # with torch.inference_mode(), sdpa_kernel(
     #     [SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH, SDPBackend.CUDNN_ATTENTION]
@@ -207,10 +215,30 @@ def time_tree(
         )
 
 
-def generate_expansion_configs(config_length, min_expansion, max_expansion):
-    values = [i for i in range(min_expansion, max_expansion)]
-    result = list(itertools.product(values, repeat=config_length))
-    return result
+def is_small_and_monotonic_decreasing(arr):
+    arr = np.array(arr)
+    return np.prod(arr) <= 64 and np.all(arr[:-1] >= arr[1:])
+
+
+def generate_expansion_configs():
+    k_1_values = np.array([1, 2, 4, 8, 16, 32])
+    k_2_values = np.array([1, 2, 4])
+    remaining_k_i_values = np.array([1, 2])
+    all_configs = []
+    for length in [2, 3, 4, 8]:
+        all_configs.extend(
+            list(
+                itertools.product(
+                    k_1_values,
+                    k_2_values,
+                    *[remaining_k_i_values for _ in range(length - 2)],
+                )
+            )
+        )
+    # Two length 32 configs
+    all_configs.append([32] + [1] * 31)
+    all_configs.append([32, 2] + [1] * 30)
+    return list(filter(is_small_and_monotonic_decreasing, all_configs))
 
 
 def reset_memory():
@@ -245,25 +273,18 @@ def main(parser):
         .eval()
     )
 
-    attn_implementation = "flash_attention_2" if args.flash else "sdpa"
     llm = (
         AutoModelForCausalLM.from_pretrained(
             _LLM_NAME,
-            attn_implementation=attn_implementation,
+            attn_implementation=_get_llama_attn_implementation(use_flash=args.flash),
             torch_dtype=torch.float16,
         )
         .cuda()
         .eval()
     )
 
-    expansion_configs = []
-    for length in range(2, 5):
-        expansion_configs.extend(
-            generate_expansion_configs(length, 1, 6)
-        )  # first arg = length of config, second arg = min val in config, third = max
-    # expansion_configs = [[32, 2, 2] + [1 for _ in range(29)]]
+    expansion_configs = generate_expansion_configs()
     kv_sizes = [0, 2, 4, 8, 16, 64, 128]
-    # past_key_values, need tuple of two tensors of shape (batch_size, num_heads, sequence_length, embed_size_per_head))
     sequential_times = {}
     tree_times = {}
 
@@ -444,7 +465,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--min_run_time",
         type=int,
-        default=1,
+        default=2,
         help="Minimum number of seconds to run the benchmark (blocked_autorange parameter).",
     )
     parser.add_argument(
