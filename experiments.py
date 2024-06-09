@@ -9,7 +9,6 @@ from typing import Sequence
 import torch
 import numpy as np
 from tqdm import tqdm
-from torch.nn.attention import SDPBackend, sdpa_kernel
 import copy
 import argparse
 import itertools
@@ -18,6 +17,7 @@ import torch.utils.benchmark as benchmark
 import numpy as np
 import pickle
 from datetime import datetime
+import dataclasses
 
 
 _SSM_NAME = "JackFram/llama-160m"
@@ -172,9 +172,7 @@ def _create_dummy_kv_cache(
 
 
 def time_normal(input_ids, model: AutoModelForCausalLM, kv_cache=None):
-    with torch.inference_mode(), sdpa_kernel(
-        [SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH, SDPBackend.CUDNN_ATTENTION]
-    ):
+    with torch.inference_mode(), torch.backends.cuda.sdp_kernel(enable_flash=False):
         model(
             input_ids=input_ids,
             past_key_values=kv_cache,
@@ -185,9 +183,7 @@ def time_normal(input_ids, model: AutoModelForCausalLM, kv_cache=None):
 def time_tree(
     input_ids, mask, position_ids, model: AutoModelForCausalLM, kv_cache=None
 ):
-    with torch.inference_mode(), sdpa_kernel(
-        [SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH, SDPBackend.CUDNN_ATTENTION]
-    ):
+    with torch.inference_mode(), torch.backends.cuda.sdp_kernel(enable_flash=False):
         model(
             input_ids=input_ids,
             attention_mask=mask,
@@ -214,6 +210,16 @@ def end_memory_collection():
     torch.cuda.synchronize()
     max_mem_gb = torch.cuda.max_memory_allocated() / 1024**3
     return max_mem_gb
+
+
+@dataclasses.dataclass
+class BenchmarkResult:
+    mean_time: float
+    median_time: float
+    p90_time: float
+    num_samples: int
+    mem_gb: float
+    utilization: float
 
 
 def main(parser):
@@ -308,7 +314,14 @@ def main(parser):
                 )
                 utilization = torch.cuda.utilization()
                 mem_gb = end_memory_collection()
-                sequential_times[overall_conf] = [seq_time_median, mem_gb, utilization]
+                sequential_times[overall_conf] = BenchmarkResult(
+                    mean_time=seq_time_mean,
+                    median_time=seq_time_median,
+                    p90_time=seq_p90,
+                    num_samples=seq_num_samples,
+                    mem_gb=mem_gb,
+                    utilization=utilization,
+                )
                 print("Mem GB: ", mem_gb)
                 print("Utilization: ", utilization)
 
@@ -381,7 +394,14 @@ def main(parser):
                 utilization = torch.cuda.utilization()
                 print("Mem GB: ", mem_gb)
                 print("Utilization: ", utilization)
-                tree_times[overall_conf] = [tree_time_median, mem_gb, utilization]
+                tree_times[overall_conf] = BenchmarkResult(
+                    mean_time=tree_time_mean,
+                    median_time=tree_time_median,
+                    p90_time=tree_p90,
+                    num_samples=tree_num_samples,
+                    mem_gb=mem_gb,
+                    utilization=utilization,
+                )
                 reset_memory()
                 print("-----------")
             except RuntimeError as e:
