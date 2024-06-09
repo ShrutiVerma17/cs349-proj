@@ -19,6 +19,8 @@ import pickle
 from datetime import datetime
 import dataclasses
 
+# from torch.nn.attention import SDPBackend, sdpa_kernel
+
 
 _SSM_NAME = "JackFram/llama-160m"
 _LLM_NAME = "openlm-research/open_llama_3b_v2"
@@ -86,20 +88,20 @@ def _invert_4d_attention_mask(
     # The attention mask must have last 2 dims shape [current seq len, KV cache size + current seq len]
     # So we prepend a tensor of 1s to allow attending to the full KV cache
     assert attention_mask.dim() == 4
-    if kv_cache_num_tokens > 0:
-        attention_mask = torch.cat(
-            (
-                torch.ones(
-                    attention_mask.shape[0],
-                    attention_mask.shape[1],
-                    attention_mask.shape[2],
-                    kv_cache_num_tokens,
-                    dtype=torch.float16,
-                ).to(device),
-                attention_mask,
+    attention_mask = torch.cat(
+        (
+            torch.ones(
+                attention_mask.shape[0],
+                attention_mask.shape[1],
+                attention_mask.shape[2],
+                kv_cache_num_tokens,
+                dtype=torch.float16,
+                device=device,
             ),
-            dim=-1,
-        )
+            attention_mask,
+        ),
+        dim=-1,
+    )
     # Invert the mask: 0s to -inf and 1s to 0 (0 means attention allowed)
     min_dtype = torch.finfo(torch.float16).min
     min_dtype = min_dtype if attention_mask.dtype == torch.float16 else -1e4
@@ -158,7 +160,7 @@ def _create_dummy_kv_cache(
         kv_cache_num_tokens,
         hidden_size // num_attention_heads,
         dtype=torch.float16,
-        device="cuda",
+        device=device,
     )
     v = torch.rand(
         batch_size,
@@ -166,13 +168,16 @@ def _create_dummy_kv_cache(
         kv_cache_num_tokens,
         hidden_size // num_attention_heads,
         dtype=torch.float16,
-        device="cuda",
+        device=device,
     )
     return tuple((k, v) for _ in range(num_layers))
 
 
 def time_normal(input_ids, model: AutoModelForCausalLM, kv_cache=None):
-    with torch.inference_mode(), torch.backends.cuda.sdp_kernel(enable_flash=False):
+    # with torch.inference_mode(), sdpa_kernel(
+    #     [SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH, SDPBackend.CUDNN_ATTENTION]
+    # ):
+    with torch.inference_mode():
         model(
             input_ids=input_ids,
             past_key_values=kv_cache,
@@ -181,12 +186,21 @@ def time_normal(input_ids, model: AutoModelForCausalLM, kv_cache=None):
 
 
 def time_tree(
-    input_ids, mask, position_ids, model: AutoModelForCausalLM, kv_cache=None
+    input_ids,
+    mask,
+    position_ids,
+    model: AutoModelForCausalLM,
+    kv_size,
+    kv_cache=None,
 ):
-    with torch.inference_mode(), torch.backends.cuda.sdp_kernel(enable_flash=False):
+    # with torch.inference_mode(), sdpa_kernel(
+    #     [SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH, SDPBackend.CUDNN_ATTENTION]
+    # ):
+    with torch.inference_mode():
         model(
             input_ids=input_ids,
-            attention_mask=mask,
+            # Required for 4D mask support in new HF. Include in timing since it's included for sequential in HF code.
+            attention_mask=_invert_4d_attention_mask(mask, kv_size),
             position_ids=position_ids,
             past_key_values=kv_cache,
             use_cache=kv_cache is not None,
@@ -247,6 +261,7 @@ def main(parser):
         expansion_configs.extend(
             generate_expansion_configs(length, 1, 6)
         )  # first arg = length of config, second arg = min val in config, third = max
+    # expansion_configs = [[32, 2, 2] + [1 for _ in range(29)]]
     kv_sizes = [0, 2, 4, 8, 16, 64, 128]
     # past_key_values, need tuple of two tensors of shape (batch_size, num_heads, sequence_length, embed_size_per_head))
     sequential_times = {}
@@ -346,11 +361,9 @@ def main(parser):
                     tree_mask.shape[2] == correct_len
                     and tree_mask.shape[3] == correct_len
                 )
-                # Required for 4D mask support in new HF
-                tree_mask = _invert_4d_attention_mask(tree_mask, kv_size)
 
                 tree_timer = benchmark.Timer(
-                    stmt="time_tree(input_ids, mask, position_ids, model, kv_cache)",
+                    stmt="time_tree(input_ids, mask, position_ids, model, kv_size, kv_cache)",
                     setup="from __main__ import time_tree",
                     num_threads=torch.get_num_threads(),
                     globals={
@@ -358,6 +371,7 @@ def main(parser):
                         "mask": tree_mask,
                         "position_ids": tree_position_ids,
                         "model": llm,
+                        "kv_size": kv_size,
                         "kv_cache": kv_cache_tree,
                     },
                     label="Tree",
@@ -380,6 +394,7 @@ def main(parser):
                     mask=tree_mask,
                     position_ids=tree_position_ids,
                     model=llm,
+                    kv_size=kv_size,
                     kv_cache=kv_cache_tree,
                 )
                 reset_memory()
@@ -388,6 +403,7 @@ def main(parser):
                     mask=tree_mask,
                     position_ids=tree_position_ids,
                     model=llm,
+                    kv_size=kv_size,
                     kv_cache=kv_cache_tree,
                 )
                 mem_gb = end_memory_collection()
