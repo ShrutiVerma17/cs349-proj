@@ -272,7 +272,6 @@ def main(parser):
             _LLM_NAME,
             attn_implementation=_get_llama_attn_implementation(use_flash=args.flash),
             torch_dtype=torch.float16,
-            token="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",
         )
         .cuda()
         .eval()
