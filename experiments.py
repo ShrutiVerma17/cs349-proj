@@ -30,8 +30,9 @@ assert torch.cuda.is_available()
 tokenizer = AutoTokenizer.from_pretrained(_SSM_NAME)
 
 
-_PROMPT = "The good dog is"
-assert len(tokenizer.tokenize(_PROMPT)) == 4
+_PROMPT = "The"
+_PROMPT_LENGTH_TOKENS = len(tokenizer.tokenize(_PROMPT))
+assert _PROMPT_LENGTH_TOKENS == 1
 
 
 def _create_token_tree(
@@ -59,12 +60,6 @@ def _create_token_tree(
     """
     assert expansion_config
     current_tree = tokenizer(prompt, return_tensors="pt").input_ids.cuda()
-    if has_kv_cache:
-        assert tokenizer.add_bos_token
-        current_tree = current_tree[:, 1:]
-    else:
-        current_tree = current_tree[:, :-1]
-    assert current_tree.shape[-1] == 4
     for k in expansion_config:
         output = model.generate(
             current_tree,
@@ -78,6 +73,8 @@ def _create_token_tree(
         # Join the top_k tokens to the current tree
         current_tree = torch.cat((current_tree, top_k), dim=-1)
 
+    if has_kv_cache:
+        return current_tree[:, _PROMPT_LENGTH_TOKENS + 1 :]  # add 1 for BOS
     return current_tree
 
 
@@ -222,10 +219,10 @@ def is_small_and_monotonic_decreasing(arr):
 
 def generate_expansion_configs():
     k_1_values = np.array([1, 2, 4, 8, 16, 32])
-    k_2_values = np.array([1, 2, 4])
-    remaining_k_i_values = np.array([1, 2])
+    k_2_values = np.array([1, 2])
+    remaining_k_i_values = np.array([1])
     all_configs = []
-    for length in [2, 3, 4, 8]:
+    for length in [2, 3, 4, 8, 16, 32]:
         all_configs.extend(
             list(
                 itertools.product(
@@ -235,9 +232,6 @@ def generate_expansion_configs():
                 )
             )
         )
-    # Two length 32 configs
-    all_configs.append([32] + [1] * 31)
-    all_configs.append([32, 2] + [1] * 30)
     return list(filter(is_small_and_monotonic_decreasing, all_configs))
 
 
@@ -278,13 +272,15 @@ def main(parser):
             _LLM_NAME,
             attn_implementation=_get_llama_attn_implementation(use_flash=args.flash),
             torch_dtype=torch.float16,
+            token="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",
         )
         .cuda()
         .eval()
     )
+    print(llm.config._attn_implementation)
 
     expansion_configs = generate_expansion_configs()
-    kv_sizes = [0, 2, 4, 8, 16, 64, 128]
+    kv_sizes = [0, 4, 8, 16, 64, 128]
     sequential_times = {}
     tree_times = {}
 
@@ -311,7 +307,7 @@ def main(parser):
                     num_layers=llm.config.num_hidden_layers,
                 )
 
-                if batch_size % 8 == 0 and token_tree.shape[-1] % 8 == 0:
+                if batch_size % 8 == 0 and (kv_size + token_tree.shape[-1]) % 8 == 0:
                     print("Multiples of 8!")
 
                 sequential_timer = benchmark.Timer(
@@ -361,7 +357,11 @@ def main(parser):
                 print("Mem GB: ", mem_gb)
                 print("Utilization: ", utilization)
 
+                del kv_cache_sequential
+                reset_memory()
+
                 if args.flash:
+                    del token_tree
                     # Skipping tree for flash attention since it can't use it
                     continue
 
@@ -376,7 +376,9 @@ def main(parser):
                 tree_input, tree_mask, tree_position_ids = construct_tree_model_inputs(
                     token_tree
                 )
-                correct_len = len(_PROMPT.split(" ")) + np.sum(np.cumprod(config))
+                correct_len = np.sum(np.cumprod(config))
+                if not kv_size:
+                    correct_len += _PROMPT_LENGTH_TOKENS + 1  # add 1 for BOS
                 assert tree_input.shape[-1] == correct_len
                 assert (
                     tree_mask.shape[2] == correct_len
@@ -439,6 +441,13 @@ def main(parser):
                     mem_gb=mem_gb,
                     utilization=utilization,
                 )
+                del (
+                    tree_input,
+                    tree_mask,
+                    tree_position_ids,
+                    kv_cache_tree,
+                    token_tree,
+                )
                 reset_memory()
                 print("-----------")
             except RuntimeError as e:
@@ -449,13 +458,18 @@ def main(parser):
     print(tree_times)
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
-    sequential_file_name = f"saved_sequential"
+    sequential_file_name = "saved_sequential"
     if args.flash:
         sequential_file_name += "_flash"
+    if args.pkl_suffix:
+        sequential_file_name += f"_{args.pkl_suffix}"
     f = open(f"{sequential_file_name}_{timestamp}.pkl", "wb")
     pickle.dump(sequential_times, f)
     f.close()
-    f2 = open(f"saved_tree_{timestamp}.pkl", "wb")
+    tree_file_name = "saved_tree"
+    if args.pkl_suffix:
+        tree_file_name += f"_{args.pkl_suffix}"
+    f2 = open(f"{tree_file_name}_{timestamp}.pkl", "wb")
     pickle.dump(tree_times, f2)
     f2.close()
 
@@ -472,5 +486,8 @@ if __name__ == "__main__":
         "--flash",
         action="store_true",
         help="Allow flash attention 2 for sequential decoding. Skips tree since this would throw an error.",
+    )
+    parser.add_argument(
+        "--pkl_suffix", type=str, help="Suffix for the saved pickle files."
     )
     main(parser)
