@@ -99,6 +99,7 @@ def identify_compute_memory_bound(
         vocab_size=vocab_size,
         kv_cache_token_count=kv_cache_token_count,
     )
+    print(memory_tb)
     arithmetic_intensity = tflops / memory_tb
     gpu_ratio = gpu.tflops / gpu.memory_bandwidth_tb_s
 
@@ -110,3 +111,37 @@ def identify_compute_memory_bound(
         print(
             f"Memory-bound: arithmetic intensity {arithmetic_intensity} < {gpu_ratio}"
         )
+
+
+def get_gpu_latency(
+    gpu: GPU,
+    token_batch: torch.Tensor,
+    dtype: torch.dtype,
+    num_layers: int,
+    d_model: int,
+    n_head: int,
+    vocab_size: int,
+    kv_cache_token_count: int,
+) -> float:
+    tflops = _total_tflops(
+        token_batch=token_batch,
+        num_layers=num_layers,
+        d_model=d_model,
+        n_head=n_head,
+        vocab_size=vocab_size,
+        kv_cache_token_count=kv_cache_token_count,
+    )
+    memory_tb = _memory_usage_tb(
+        token_batch=token_batch,
+        dtype=dtype,
+        num_layers=num_layers,
+        d_model=d_model,
+        n_head=n_head,
+        vocab_size=vocab_size,
+        kv_cache_token_count=kv_cache_token_count,
+    )
+    arithmetic_intensity = tflops / memory_tb
+    gpu_ratio = gpu.tflops / gpu.memory_bandwidth_tb_s
+    if arithmetic_intensity > gpu_ratio:
+        return tflops / gpu.tflops
+    return memory_tb / gpu.memory_bandwidth_tb_s

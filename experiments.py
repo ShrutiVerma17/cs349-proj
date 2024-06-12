@@ -19,11 +19,11 @@ import pickle
 from datetime import datetime
 import dataclasses
 
-# from torch.nn.attention import SDPBackend, sdpa_kernel
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 
 _SSM_NAME = "JackFram/llama-160m"
-_LLM_NAME = "openlm-research/open_llama_3b_v2"
+_LLM_NAME = "meta-llama/Llama-2-7b-hf"
 device = "cuda"
 
 assert torch.cuda.is_available()
@@ -35,7 +35,7 @@ _PROMPT_LENGTH_TOKENS = len(tokenizer.tokenize(_PROMPT))
 assert _PROMPT_LENGTH_TOKENS == 1
 
 
-def _create_token_tree(
+def create_token_tree(
     expansion_config: Sequence[int],
     prompt: str,
     tokenizer: AutoTokenizer,
@@ -78,7 +78,7 @@ def _create_token_tree(
     return current_tree
 
 
-def _invert_4d_attention_mask(
+def invert_4d_attention_mask(
     attention_mask: torch.Tensor, kv_cache_num_tokens: int = 0
 ) -> torch.Tensor:
     """For 4D masks, new HF requires us to invert the mask so it doesn't modify it at all."""
@@ -144,7 +144,7 @@ def construct_tree_model_inputs(sequences):
     return (input_1, mask_1, position_ids_1)
 
 
-def _create_dummy_kv_cache(
+def create_dummy_kv_cache(
     kv_cache_num_tokens: int,
     batch_size: int,
     num_attention_heads: int,
@@ -179,10 +179,9 @@ def _get_llama_attn_implementation(use_flash: bool):
 
 
 def time_normal(input_ids, model: AutoModelForCausalLM, kv_cache=None):
-    # with torch.inference_mode(), sdpa_kernel(
-    #     [SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH, SDPBackend.CUDNN_ATTENTION]
-    # ):
-    with torch.inference_mode():
+    with torch.inference_mode(), sdpa_kernel(
+        [SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH, SDPBackend.CUDNN_ATTENTION]
+    ):
         model(
             input_ids=input_ids,
             past_key_values=kv_cache,
@@ -198,14 +197,13 @@ def time_tree(
     kv_size,
     kv_cache=None,
 ):
-    # with torch.inference_mode(), sdpa_kernel(
-    #     [SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH, SDPBackend.CUDNN_ATTENTION]
-    # ):
-    with torch.inference_mode():
+    with torch.inference_mode(), sdpa_kernel(
+        [SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH, SDPBackend.CUDNN_ATTENTION]
+    ):
         model(
             input_ids=input_ids,
             # Required for 4D mask support in new HF. Include in timing since it's included for sequential in HF code.
-            attention_mask=_invert_4d_attention_mask(mask, kv_size),
+            attention_mask=invert_4d_attention_mask(mask, kv_size),
             position_ids=position_ids,
             past_key_values=kv_cache,
             use_cache=kv_cache is not None,
@@ -272,6 +270,7 @@ def main(parser):
             _LLM_NAME,
             attn_implementation=_get_llama_attn_implementation(use_flash=args.flash),
             torch_dtype=torch.float16,
+            token="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",
         )
         .cuda()
         .eval()
@@ -289,7 +288,7 @@ def main(parser):
             overall_conf = str(config) + ", " + str(kv_size)
             print(overall_conf)
             try:
-                token_tree = _create_token_tree(
+                token_tree = create_token_tree(
                     expansion_config=config,
                     prompt=_PROMPT,
                     tokenizer=tokenizer,
@@ -298,7 +297,7 @@ def main(parser):
                 )
 
                 batch_size = np.prod(config)
-                kv_cache_sequential = _create_dummy_kv_cache(
+                kv_cache_sequential = create_dummy_kv_cache(
                     kv_cache_num_tokens=kv_size,
                     batch_size=batch_size,
                     num_attention_heads=llm.config.num_attention_heads,
@@ -365,7 +364,7 @@ def main(parser):
                     continue
 
                 # construct inputs for tree decoding
-                kv_cache_tree = _create_dummy_kv_cache(
+                kv_cache_tree = create_dummy_kv_cache(
                     kv_cache_num_tokens=kv_size,
                     batch_size=1,
                     num_attention_heads=llm.config.num_attention_heads,
